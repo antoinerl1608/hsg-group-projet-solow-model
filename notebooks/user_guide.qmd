@@ -1,0 +1,453 @@
+---
+title: "User Guide - SolowAnalyzer"
+author:
+  - "William Wuillemin"
+  - "Nikolaus Protzen"
+  - "Alexandre Zaza"
+  - "Antoine Reil"
+  - "Arthur Vallery"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    number-sections: false
+    code-fold: false
+    code-annotations: hover
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: true
+  error: true
+  freeze: false
+jupyter: python3
+---
+
+## Class Overview
+
+`SolowAnalyzer` is a Python toolkit built around the Solow open-economy growth model. It reads economic data from a local DuckDB database populated from FRED and the World Bank API, and provides ready-to-use methods to compute model parameters, steady-state values, convergence paths, and policy scenarios for a sample of 14 countries over the period 2000-2015.
+
+The idea is simple: once the class is instantiated, you can go from raw data to publication-ready figures in a few lines, without touching any SQL or worrying about where the data comes from.
+
+The underlying data comes from two sources. GDP, population, and population growth are retrieved from FRED. Savings rate and labor force come from the World Bank public API. Both are stored in the same DuckDB database and accessed transparently through the class methods.
+
+**Note on inputs:** country codes and indicator keys are case-insensitive throughout. `"usa"`, `"USA"`, and `"Usa"` are all equivalent, and the same applies to indicator names like `"GDP"` vs `"gdp"`. The class normalises everything internally.
+
+---
+
+## Method Index
+
+Use this table to find what you need without reading the full guide.
+
+| Method | Type | Description |
+|---|---|---|
+| `get_available_countries()` | Data access | List all country codes in the database |
+| `get_indicator()` | Data access | Query a single indicator time series |
+| `build_country_parameters()` | Computation | Compute the full set of Solow parameters for a country |
+| `summary_table()` | Output | Print a formatted parameter summary for a country |
+| `plot_gdp_comparison()` | Output | Plot GDP per capita over time across countries |
+| `plot_convergence()` | Output | Plot convergence paths toward the Solow steady state |
+| `plot_scenario()` | Output | Simulate and plot a chosen policy scenario |
+| `compare_steady_states()` | Output | Bar chart comparing steady-state GDP per capita |
+| `plot_indicator()` | Output | Plot any raw indicator over time across countries |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+Make sure the Python environment is set up with:
+
+```bash
+uv sync               # install all dependencies from uv.lock
+```
+
+The database file `data/fred_WB.db` is committed to the repository, so no API calls are needed to run the analysis. If you want to rebuild it from scratch, see `data/build_data.py` and the API key instructions below.
+
+### API Key (only needed to rebuild the database)
+
+The data retrieval script pulls from FRED, which requires a free API key from [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html). The World Bank data is fetched from a public API and requires no key.
+
+Once you have your FRED key, create a `.env` file in the project root; never commit this file, it is already in `.gitignore`:
+
+```
+FRED_API_KEY=your_actual_key_here
+```
+
+The script loads it automatically at runtime with `python-dotenv`. You never need to hardcode the key anywhere in your code.
+
+### Instantiating the Class
+
+```python
+from src.your_class import SolowAnalyzer
+
+# All default parameters -
+ db_path resolves automatically to data/fred_WB.db
+analyzer = SolowAnalyzer()
+
+# Or pass a custom path and override model parameters
+analyzer = SolowAnalyzer("data/fred_WB.db", alpha=0.4)
+```
+
+All parameters are optional and have sensible defaults drawn from the Solow model literature. See the parameter table below for details.
+
+### Checking Available Countries
+
+Before running any analysis, it is worth checking which countries are in the database:
+
+```python
+countries = analyzer.get_available_countries()
+print(countries)
+# ['ARG', 'BRA', 'CAN', 'CHN', 'FRA', 'GBR', 'GHA', 'ITA', 'JPN', 'KEN', 'KOR', 'SGP', 'USA', 'ZAF']
+```
+
+Every method that accepts a country argument uses these three-letter ISO codes. They are case-insensitive, so `"ken"` and `"KEN"` both work.
+
+---
+
+## Class Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `db_path` | `str or Path` | `None` | Path to the DuckDB database file. If `None`, resolves automatically to `data/fred_WB.db` relative to the source file |
+| `alpha` | `float` | `0.33` | Capital share of output in the Cobb-Douglas production function; must be strictly between 0 and 1 |
+| `delta` | `float` | `0.05` | Annual depreciation rate of capital; must be non-negative |
+| `g` | `float` | `0.02` | Long-run rate of technological progress |
+| `world_interest_rate` | `float` | `0.02` | Exogenous world real interest rate; must be non-negative. |
+| `ky_ratio` | `float` | `3.0` | Capital-to-output ratio used to approximate the initial capital stock; must be strictly positive. Empirically, the values are generally between 2.5 and 4.0 |
+
+**Errors raised at instantiation:**
+
+- `ValueError` - if `alpha` is not strictly between 0 and 1
+- `ValueError` - if `delta` is negative
+- `ValueError` - if `world_interest_rate` is negative
+- `ValueError` - if `ky_ratio` is not positive
+- `FileNotFoundError` - if no database file is found at `db_path`
+
+---
+
+## Method Reference
+
+### `get_available_countries()`
+
+Returns the list of all country codes present in the database. Good to call first to know what you can work with before passing anything to the other methods.
+
+**Parameters:** none
+
+**Returns:** `list of str` ISO-3 country codes in uppercase.
+
+```python
+analyzer.get_available_countries()
+# ['ARG', 'BRA', 'CAN', 'CHN', 'FRA', 'GBR', 'GHA',
+#  'ITA', 'JPN', 'KEN', 'KOR', 'SGP', 'USA', 'ZAF']
+```
+
+---
+
+### `get_indicator(country, indicator_key, start_year=None, end_year=None)`
+
+Queries a single indicator time series for one country directly from the database. This is the low-level data access method; most users will reach for the output methods directly, but this is useful when you want to inspect raw data before running the model.
+
+Both `country` and `indicator_key` are case-insensitive.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `country` | `str` | required | ISO-3 country code, case-insensitive (e.g. `"USA"` or `"usa"`) |
+| `indicator_key` | `str` | required | One of: `"gdp"`, `"population"`, `"population_growth"`, `"savings_rate"`, `"labor_force"` (case-insensitive) |
+| `start_year` | `int` | `None` | First year to include (inclusive). Can be used without `end_year` |
+| `end_year` | `int` | `None` | Last year to include (inclusive). Can be used without `start_year` |
+
+**Returns:** `pd.DataFrame` with columns `["year", "value"]`, sorted by year.
+
+**Raises:**
+
+- `TypeError` - if `country` or `indicator_key` is not a string
+- `ValueError` - if the country code is not in the database
+- `ValueError` - if `indicator_key` is not one of the five valid options
+- `ValueError` - if both bounds are given and `end_year < start_year`
+
+```python
+# Full series - no year filter
+df = analyzer.get_indicator("KEN", "savings_rate")
+
+# Case-insensitive - this works too
+df = analyzer.get_indicator("ken", "SAVINGS_RATE")
+
+# Filter from a start year only
+df = analyzer.get_indicator("USA", "gdp", start_year=2005)
+
+# Filter with both bounds
+df = analyzer.get_indicator("USA", "gdp", start_year=2000, end_year=2010)
+```
+
+---
+
+### `build_country_parameters(country)`
+
+Computes the full set of Solow model parameters for a country. This is the backbone that all output methods rely on internally; you rarely need to call it directly, but it is handy when you want to inspect intermediate values like the calibrated productivity `B`, the savings rate `s`, or the convergence half-life before running any plots.
+
+It pulls savings rate, population growth, GDP, and labor force from the database, calibrates total factor productivity, solves the open-economy steady state, and returns everything as a single dictionary.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `country` | `str` | ISO-3 country code, case-insensitive (e.g. `"KEN"`) |
+
+**Returns:** `dict` with the following keys:
+
+| Key | Description |
+|---|---|
+| `country` | Country code, normalised to uppercase |
+| `s` | Average savings rate (decimal e.g. 0.15 means 15%, divided by 100 from raw data) |
+| `n` | Average population growth rate (decimal - also divided by 100 from raw data) |
+| `B` | Calibrated total factor productivity |
+| `half_life` | Years to close half the gap to steady state (`None` if convergence speed is non-positive) |
+| `k_star` | Steady-state capital per worker |
+| `y_star` | Steady-state GDP per capita |
+| `c_star` | Steady-state consumption per capita |
+
+**Raises:**
+
+- `TypeError` - if `country` is not a string
+- `ValueError` - if the country is not in the database
+- `ValueError` - if the calibrated parameters yield an unstable model (`s * world_interest_rate >= n`)
+
+```python
+params = analyzer.build_country_parameters("KEN")
+print(params["y_star"])    # steady-state GDP per capita
+print(params["half_life"]) # years to close half the gap to steady state
+print(params["s"])         # average savings rate as a decimal
+```
+
+---
+
+### `summary_table(country)`
+
+Prints and returns a tidy summary of the key Solow parameters: savings rate, population growth, calibrated productivity, steady-state GDP per capita and consumption, and convergence half-life. A good first step before running any plots.
+
+This method is flexible it accepts a single country code, a list of country codes, or `None` to display all available countries at once.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `country` | `str`, `list of str`, or `None` | ISO-3 country code(s), case-insensitive. Pass `None` to display all countries |
+
+**Returns:** `pd.DataFrame` if a single country is given successfully. `list of pd.DataFrame` if multiple countries are given. `None` if an error occurs. Also prints to standard output.
+
+**Note:** bad country codes and unstable countries are reported via printed messages and result in `None` being returned rather than raising an exception.
+
+```python
+# Single country
+analyzer.summary_table("KEN")
+
+# Multiple countries at once
+analyzer.summary_table(["KEN", "USA", "ZAF"])
+
+# All countries in the database
+analyzer.summary_table(None)
+```
+
+---
+
+### `plot_gdp_comparison(countries=None, start_year=None...)`
+
+Plots GDP per capita over time for one or more countries on a single chart. A useful starting point to get a visual sense of income levels and growth trajectories before running the model. When the steady state is unstable for one or some countries, the plot for those countries is not shown and the countries are listed in a printed warning.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `countries` | `str`, `list of str`, or `None` | `None` | Country code(s) to include. A single string is accepted. If `None`, all available countries are used |
+| `start_year` | `int` | `None` | First year to include. Must be in the range 2000–2100. Can be used without `end_year` |
+| `end_year` | `int` | `None` | Last year to include. Must be in the range 2000–2100 and `>= start_year` if both are given |
+| `show` | `bool` | `True` | If `True`, displays the plot. Set to `False` to return the figure without displaying it |
+
+**Returns:** `matplotlib.figure.Figure` or `None` if input validation fails before any plotting.
+
+**Note:** bad country codes, missing data, and unstable countries are skipped with a printed warning rather than raising an exception. The figure is still returned for any valid countries that were plotted successfully.
+
+```python
+# All countries
+analyzer.plot_gdp_comparison()
+
+# Single country as a string
+analyzer.plot_gdp_comparison("USA")
+
+# Subset filtered by year range
+analyzer.plot_gdp_comparison(["USA", "KEN", "CHN"], start_year=2000, end_year=2015)
+
+# Save the figure without displaying it
+fig = analyzer.plot_gdp_comparison(["USA", "KEN"], show=False)
+fig.savefig("gdp_comparison.png", dpi=150)
+```
+
+---
+
+### `plot_convergence(countries=None, show=True)`
+
+Plots each country's convergence path toward its Solow open-economy steady state. For each country, the log deviation of actual GDP per capita from the predicted steady-state value (y\*) is plotted against years since the start of the sample. A value of zero means the country is exactly at its steady state; negative values mean it is below and should be converging upward.
+
+Countries whose calibration produces an unstable model are skipped with a printed warning, and added to the list `unstable`.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `countries` | `str`, `list of str`, or `None` | `None` | Country code(s) to include. A single string is accepted. If `None`, all available countries are used |
+| `show` | `bool` | `True` | If `True`, displays the plot |
+
+**Returns:** `matplotlib.figure.Figure` or `None` if the top-level country argument is rejected before any plotting.
+
+**Note:** bad country codes and unstable countries are skipped with a printed warning rather than raising an exception.
+
+```python
+# All countries
+analyzer.plot_convergence()
+
+# A specific subset
+analyzer.plot_convergence(["USA", "KEN", "ZAF"])
+```
+
+---
+
+### `plot_scenario(country, new_s=None, new_n=None, new_r=None...)`
+
+Simulates and plots what happens to a country's GDP per capita path when you change one or more model parameters. The baseline trajectory and the counterfactual are shown on the same chart, which makes it easy to see how much a policy change shifts the long-run steady state and how long the transition would take. When the steady state is unstable, the plot is not shown and a warning is printed.
+
+If no counterfactual parameters are provided, the method plots the baseline convergence path on its own.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `country` | `str` | required | ISO-3 country code, case-insensitive |
+| `new_s` | `float` | `None` | Counterfactual savings rate (e.g. `0.25` for 25%). Must be strictly between 0 and 1 |
+| `new_n` | `float` | `None` | Counterfactual population growth rate (decimal). Must be non-negative |
+| `new_r` | `float` | `None` | Counterfactual world interest rate (decimal). Must be non-negative |
+| `new_g` | `float` | `None` | Counterfactual technological growth rate (decimal) |
+| `new_delta` | `float` | `None` | Counterfactual depreciation rate (decimal) |
+| `periods` | `int` | `50` | Number of years to simulate forward. Must be a positive integer |
+| `show` | `bool` | `True` | If `True`, displays the plot |
+
+**Returns:** `matplotlib.figure.Figure` or `None` if the input is invalid or the scenario is unstable.
+
+**Note:** rather than raising exceptions, this method prints a descriptive warning and returns `None` for invalid inputs or unstable scenarios. Always check the return value before saving the figure.
+
+```python
+# What if Kenya raised its savings rate to 25%?
+analyzer.plot_scenario("KEN", new_s=0.25)
+
+# What if Ghana had lower population growth, simulated over 100 years?
+analyzer.plot_scenario("GHA", new_n=0.01, periods=100)
+
+# What if the world interest rate dropped to 1%?
+analyzer.plot_scenario("ZAF", new_r=0.01)
+
+# Combine multiple changes and save without displaying
+fig = analyzer.plot_scenario("ZAF", new_s=0.30, new_n=0.015, show=False)
+if fig is not None:
+    fig.savefig("scenario_zaf.png", dpi=150)
+```
+
+---
+
+### `compare_steady_states(countries=None, show=True)`
+
+Plots a bar chart comparing predicted steady-state GDP per capita (y\*) across countries. Useful for a quick cross-country look at where the model predicts each economy will end up in the long run, given its current savings rate, population growth, and productivity. This packages require the package matplotlib.pyplot as plt to be loaded to work.
+
+Countries whose calibration is unstable are skipped with a printed warning, and added to the list `unstable`.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `countries` | `str`, `list of str`, or `None` | `None` | Country code(s) to compare. A single string is accepted. If `None`, all available countries are used |
+| `show` | `bool` | `True` | If `True`, displays the plot |
+
+**Returns:** `matplotlib.figure.Figure` or `None` if no stable countries are available to plot.
+
+**Note:** bad country codes and unstable countries are skipped with a printed warning rather than raising an exception.
+
+```python
+# All countries
+analyzer.compare_steady_states()
+
+# A specific subset
+analyzer.compare_steady_states(["USA", "KEN", "CHN", "ZAF"])
+```
+
+---
+
+### `plot_indicator(countries, indicator_key...)`
+
+Plots any raw indicator from the database over time for one or more countries. Handy for exploring the data before using it as model input; for instance, checking how savings rates or population growth evolved over the sample period. When the steady state is unstable for one or some countries, the plot for those countries is not shown and the countries are listed in a printed warning. This packages require the package matplotlib.pyplot as plt to be loaded to work. **Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `countries` | `str` or `list of str` | required | Country code(s) to plot. A single string is accepted |
+| `indicator_key` | `str` | required | Indicator to plot, case-insensitive. One of: `"gdp"`, `"population"`, `"population_growth"`, `"savings_rate"`, `"labor_force"` |
+| `start_year` | `int` | `None` | First year to include. Can be used without `end_year` |
+| `end_year` | `int` | `None` | Last year to include. Must be `>= start_year` if both are given |
+| `show` | `bool` | `True` | If `True`, displays the plot |
+
+**Returns:** `matplotlib.figure.Figure` or `None` if the indicator key is invalid or the country argument is rejected.
+
+**Raises:**
+
+- `TypeError` if `indicator_key` is not a string (validated before any country lookup)
+
+**Note:** bad country codes and missing data are skipped with a printed warning rather than raising an exception.
+
+```python
+# Savings rate over time for three countries
+analyzer.plot_indicator(["ZAF", "KEN", "USA"], "savings_rate")
+
+# Case-insensitive indicator key
+analyzer.plot_indicator(["ZAF", "KEN"], "SAVINGS_RATE")
+
+# Population growth for all countries, filtered by year
+analyzer.plot_indicator(
+    analyzer.get_available_countries(),
+    "population_growth",
+    start_year=2000,
+    end_year=2015
+)
+```
+
+---
+
+## Typical Workflow
+
+Here is a complete example going from instantiation to all the main outputs. You can use this as a starting point and adapt the countries or indicators to your own questions.
+
+```python
+from src.your_class import SolowAnalyzer
+
+# 1. Instantiate with default parameters
+analyzer = SolowAnalyzer()
+
+# 2. Check what countries are available
+countries = analyzer.get_available_countries()
+print(countries)
+
+# 3. Inspect model parameters for one country before running plots
+#    - useful to sanity-check savings rate, productivity B, and half-life
+analyzer.summary_table("KEN")
+
+# 4. Plot raw GDP per capita trajectories to get a sense of the data
+analyzer.plot_gdp_comparison(countries)
+
+# 5. See how far each country is from its predicted steady state over time
+analyzer.plot_convergence(countries)
+
+# 6. Compare where each country is headed in the long run
+analyzer.compare_steady_states(countries)
+
+# 7. Ask a what-if question: what if Kenya saved more?
+analyzer.plot_scenario("KEN", new_s=0.25, periods=50)
+```
