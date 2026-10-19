@@ -1,0 +1,298 @@
+---
+# YAML Front Matter — controls the document's metadata and output settings.
+# Copy (and adapt) this for your own notebooks.
+title: "Analysis"
+author:
+  - "William Wuillemin"
+  - "Nikolaus Protzen"
+  - "Alexandre Zaza"
+  - "Antoine Reil"
+  - "Arthur Vallery"
+  
+date: today                  # Automatically uses the date you render the document
+format:
+  html:
+    toc: true                # Adds a Table of Contents on the side
+    toc-depth: 4             # Includes headings up to level 4 (####) in the TOC
+    number-sections: false   # Numbers your sections automatically if set to true
+    code-fold: false         # Keeps your code visible (set to true to hide it)
+    code-annotations: hover  # Reveals code annotations when hovering
+    theme: cosmo             # A clean, built-in look
+    embed-resources: true    # Packages everything into a single self-contained HTML file
+execute:
+  echo: true                 # Shows your code in the output
+  error: true                # Renders the document even if a code chunk produces an error
+  freeze: false              # Re-runs all cells on every render (no caching)
+jupyter: python3             # Tells Quarto to use your Python 3 kernel
+---
+
+## Research Question
+This analysis examines whether countries converge toward their Solow open-economy steady state, and whether the speed of convergence differs across development levels. Using the Solow growth model in a small open economy framework, where the world real interest rate is taken as given and we compute each country's predicted steady-state GDP per capita and compare it to its actual trajectory over the period 2000–2015.
+
+We classify our sample of 14 countries into three development groups:
+
+- **Developed:** USA, CAN, FRA, GBR, ITA, JPN
+- **Emerging:** KOR, CHN, SGP, BRA, ARG, ZAF
+- **Developing:** KEN, GHA
+
+The central question is: Do countries converge toward their Solow model open-economy steady state, and does the speed of convergence differ across development levels?
+
+## Data
+
+Data are sourced from two complementary sources for the period 2000–2015:
+
+**FRED (Federal Reserve Bank of St. Louis)** is used for:
+
+| Indicator | Description |
+|---|---|
+| GDP | Market GDP in current USD (World Bank via FRED) |
+| Population | Total population (World Bank via FRED) |
+| Population growth | Annual population growth rate (World Bank via FRED) |
+
+**World Bank Open Data API** is used for:
+
+| Indicator | World Bank Code | Description |
+|---|---|---|
+| Savings rate | NY.GNS.ICTR.ZS | Gross savings (% of GDP) |
+| Labor force | SL.TLF.TOTL.IN | Total labor force |
+
+All data were retrieved through APIs, stored in a local DuckDB database (`data/fred_WB.db`), and all subsequent analysis reads exclusively from that database.
+
+The structural parameters used in the model are:
+
+| Parameter | Value | Description |
+|---|---|---|
+| α | 0.33 | Capital share of output |
+| δ | 0.05 | Annual depreciation rate |
+| g | 0.02 | Technological growth rate |
+| r | 0.02 | World real interest rate |
+| K/Y | 3.0 | Capital-output ratio |
+
+
+## Data model
+
+The database contains three tables reflecting the two data sources used. GDP, population, and population growth are sourced from FRED; savings rate and labor force from the World Bank API. The tables are linked through country and indicator codes.
+
+```{mermaid}
+erDiagram
+    countries {
+        VARCHAR country_code PK
+    }
+    indicators {
+        VARCHAR indicator_key PK
+        VARCHAR description
+    }
+    observations {
+        VARCHAR country_code FK
+        VARCHAR indicator_key FK
+        INTEGER year
+        DOUBLE value
+    }
+    countries ||--o{ observations : "has"
+    indicators ||--o{ observations : "measured by"
+```
+
+## Analysis
+
+```{python}
+import sys
+import os
+sys.path.insert(0, os.path.join("..", "src"))
+from your_class import SolowAnalyzer
+
+analyzer = SolowAnalyzer("../data/fred_WB.db")
+countries = analyzer.get_available_countries()
+print("Available countries:", countries)
+```
+
+### Summary Statistics
+
+The table below presents the key Solow model parameters for each country:  savings rate, population growth, calibrated productivity, predicted steady-state GDP per capita, and convergence half-life.
+
+```{python}
+import pandas as pd
+
+rows = []
+for country in countries:
+    try:
+        params = analyzer.build_country_parameters(country)
+        rows.append({
+            "Country": country,
+            "Savings rate (s)": f"{params['s']:.3f}",
+            "Pop. growth (n)": f"{params['n']:.3f}",
+            "Productivity (B)": f"{params['B']:.3f}",
+            "Steady-state y*": f"{params['y_star']:,.0f}",
+            "Half-life (years)": f"{params['half_life']:.1f}" if params['half_life'] else "N/A"
+        })
+    except ValueError as e:
+        print(f"Skipping {country}: {e}")
+
+pd.DataFrame(rows)
+```
+
+KOR, CHN, and JPN are excluded from the table as their calibrated parameters violate the open-economy stability condition. Specifically, the model requires s·r < n to guarantee a finite steady state, when the return on foreign asset accumulation (s·r) exceeds population growth (n), wealth grows without bound and no equilibrium exists. For these three countries, the combination of relatively high savings rates and very low population growth (JPN: n = 0.0003, KOR: n = 0.0056, CHN: n = 0.0060) means this condition fails at the assumed world interest rate of r = 0.02. This is a known limitation of the open-economy Solow framework rather than a data problem and these countries are simply at a parameter combination where the model breaks down.
+
+### Country Summaries by Development Group
+
+The tables below show the Solow parameters for one representative country from each development group, illustrating the structural differences that drive income gaps.
+
+**Developed - USA:**
+```{python}
+_ = analyzer.summary_table("USA")
+```
+
+The USA has the highest productivity (B = 1,223), with a predicted steady-state GDP per capita of $161,321 and a convergence half-life of 13.1 years. Its savings rate of 17.9% and population growth of 0.9% are both moderate, consistent with a mature developed economy. The half-life of 13 years suggests the USA, despite being the wealthiest country in the sample, still has some distance to cover before reaching its long-run steady state.
+
+**Emerging - BRA:**
+```{python}
+_ = analyzer.summary_table("BRA")
+```
+
+Brazil shows dramatically lower productivity (B = 291) compared to the USA, roughly one quarter which directly explains its much lower predicted steady state of $18,900. Its savings rate is similar to the USA at 17%, but its population growth is lower at 1%, giving it a half-life of around 13 years. This suggests Brazil is still meaningfully below its steady state, though its convergence speed, a half-life of around 13 years is broadly comparable to developed economies like the USA, confirming that the speed of convergence is similar across development levels while the destination differs enormously.
+
+**Developing - KEN:**
+```{python}
+_ = analyzer.summary_table("KEN")
+```
+
+Kenya has the lowest productivity (B = 74) of the three representatives, less than 7% of the USA's level. This results in a predicted steady state of just $2,455. Its savings rate is the lowest at 10% and population growth the highest at 2.9%. In the open-economy framework, it is this very low productivity that drives the depressed steady state, not the savings rate. The half-life of 10.5 years is similar to Brazil, confirming that convergence speed is broadly comparable across development levels, while the destination differs enormously.
+
+### GDP per Capita Trajectories
+
+The figures below show actual GDP per capita over 2000–2015 by development group.
+
+**Developed economies:**
+```{python}
+developed = ["USA", "CAN", "FRA", "GBR", "ITA", "JPN"]
+_ = analyzer.plot_gdp_comparison(developed, start_year=2000, end_year=2015)
+```
+
+Developed economies cluster between $20,000 and $55,000 GDP per capita over the period. The USA shows the strongest and most consistent growth, rising steadily from $36,000 to over $57,000 by 2015. The 2008 financial crisis caused a visible dip across all countries, particularly in GBR and JPN. Italy shows the weakest overall trajectory, remaining largely flat after 2008 and consistent with its well-documented stagnation. Japan recovers partially after 2009 but declines again from 2012 onward, likely reflecting the persistent deflationary pressures of that period. Canada and the UK both experience notable drops after 2013, partly reflecting exchange rate effects on USD-denominated GDP.
+
+**Emerging economies:**
+```{python}
+emerging = ["KOR", "CHN", "SGP", "BRA", "ARG", "ZAF"]
+_ = analyzer.plot_gdp_comparison(emerging, start_year=2000, end_year=2015)
+```
+
+The emerging group shows much greater dispersion. Singapore stands out dramatically, growing from $24,000 to nearly $58,000 by 2015, surpassing most developed economies. Korea shows strong and consistent growth, rising from $13,000 to over $30,000. Brazil grows steadily through 2011, reaching ~$13,000, before declining sharply toward 2015, likely reflecting its domestic economic crisis. Argentina shows the most volatile path, collapsing around 2002 during the peso crisis before recovering steadily. South Africa grows modestly throughout. China, despite its extraordinary real growth rate, remains at the bottom of the chart in USD terms, rising from ~$1,000 to ~$8,000, reflecting its very low starting income per capita.
+
+**Developing economies:**
+```{python}
+developing = ["KEN", "GHA"]
+_ = analyzer.plot_gdp_comparison(developing, start_year=2000, end_year=2015)
+```
+
+Kenya and Ghana both grow over the period but remain below $2,500, a stark contrast to the other groups. Kenya grows steadily from ~$400 to ~$1,500, while Ghana grows more rapidly from 2005 onward, peaking sharply at ~$2,300 in 2013 before declining to ~$1,750 by 2015, likely reflecting commodity price volatility. The income gap between developing and developed economies is large and persistent, which the Solow model attributes largely to differences in total factor productivity.
+
+### Savings Rates Over Time
+
+While savings rates do not directly determine steady-state GDP per capita in the open-economy Solow model, they influence wealth accumulation and consumption levels. The figures below show how savings rates evolved across development groups over 2000–2015.
+
+**Developed economies:**
+```{python}
+developed = ["USA", "CAN", "FRA", "GBR", "ITA", "JPN"]
+_ = analyzer.plot_indicator(developed, "savings_rate", start_year=2000, end_year=2015)
+```
+
+Developed economies show savings rates ranging between 13% and 31% over the period. Japan starts highest at ~31% but declines steadily to ~25% by 2015, while the UK consistently saves the least, remaining below 17% throughout. The 2008 financial crisis is visible as a sharp dip across most countries, particularly in the USA and France, with Canada showing the most volatile path, peaking at ~25% in 2007 before dropping sharply in 2009 and recovering gradually.
+
+
+**Emerging economies:**
+```{python}
+emerging = ["KOR", "CHN", "SGP", "BRA", "ARG", "ZAF"]
+_ = analyzer.plot_indicator(emerging, "savings_rate", start_year=2000, end_year=2015)
+```
+
+Emerging economies show much greater variation. China and Singapore stand out with exceptionally high savings rates, with SGP consistently above 45% throughout and CHN rising from ~36% to above 50% by 2010 before declining slightly. Korea also saves at a high rate of ~33-36%. While these high savings rates support wealth accumulation and consumption per capita, they do not directly raise steady-state GDP per capita in the open-economy framework. By contrast, Brazil, Argentina, and South Africa save at rates between 14% and 22%, broadly comparable to developed economies.
+
+**Developing economies:**
+```{python}
+developing = ["KEN", "GHA"]
+_ = analyzer.plot_indicator(developing, "savings_rate", start_year=2000, end_year=2015)
+```
+
+Developing economies display the lowest and most volatile savings rates in the sample. Ghana collapses dramatically from ~23% in 2004 to below 5% by 2008, before recovering to ~21% by 2015. Kenya follows a similarly volatile path, dropping from ~13% in 2000 to below 7% by 2009 and remaining low thereafter. These low savings rates slow wealth accumulation and reduce consumption per capita. However, as the productivity analysis shows, it is the large gap in total factor productivity, not savings behaviour. That fundamentally explains the wide income gap between developing and developed economies in the open-economy framework.
+
+
+### Convergence by Development Group
+
+To more directly address the research question, the figures below plot convergence paths separately for each development group. This allows a cleaner comparison of how quickly countries in each group move toward their predicted steady state.
+
+**Developed economies:**
+```{python}
+developed = ["USA", "CAN", "FRA", "GBR", "ITA", "JPN"]
+_ =analyzer.plot_convergence(developed)
+```
+
+All five developed economies start between -1.5 and -1.75, well below their predicted steady states, and show a clear upward trend over the period. Canada makes the most progress, reaching nearly -0.75 by year 11 before pulling back slightly to -0.9 by 2015. France and GBR converge steadily to around -1.0. The USA converges slowly, ending around -1.05. Italy is the weakest performer, dropping back to -1.35 by year 15 after partial convergence, consistent with its post-2008 stagnation. Note that JPN is excluded from this chart as its calibration violates the open-economy stability condition (s·r ≥ n) at r = 0.02.
+
+**Emerging economies:**
+```{python}
+emerging = ["KOR", "CHN", "SGP", "BRA", "ARG", "ZAF"]
+_ = analyzer.plot_convergence(emerging)
+```
+
+KOR and CHN are excluded from this chart as their calibration violates the open-economy stability condition. Among the remaining four, Brazil shows the most rapid convergence, starting at -1.6 and reaching nearly -0.4 by year 11 before pulling back to -0.3 by 2015. Singapore converges steadily from -1.5 to around -0.6 by 2015. Argentina tells the most dramatic story, collapsing to -2.7 at year 2 which  corresponds to the 2002 peso crisis, before recovering strongly to around -1.0 by 2015. South Africa converges modestly, moving from -1.9 to around -1.1 over the period.
+
+**Developing economies:**
+```{python}
+developing = ["KEN", "GHA"]
+_ = analyzer.plot_convergence(developing)
+```
+
+Kenya and Ghana both start around -1.7, far from their steady states, but the paths diverge significantly. Ghana surges upward rapidly from year 5 onward, crossing into positive territory around year 11 and peaking at ~+0.5 at year 13, briefly exceeding its predicted steady state before falling back to ~+0.2 by 2015. This likely reflects commodity-driven growth that temporarily outpaced the model's predictions. Kenya's path is slower and more stable, converging gradually from -1.7 to around -0.5 by 2015. Both trajectories confirm that the Solow model captures the direction of growth reasonably well, even if the pace varies considerably.
+
+
+### Steady-State Comparison
+
+The bar chart below compares predicted steady-state GDP per capita (y*) across all countries. This reflects what the Solow open-economy model predicts each country will converge to in the long run, given its productivity level and the world interest rate.
+
+```{python}
+_ =analyzer.compare_steady_states(countries)
+```
+
+The predicted steady states reveal striking differences across development groups. The USA has the highest predicted steady-state income level, exceeding $160,000, reflecting its high productivity. GBR and FRA follow at around $130,000 and $115,000 respectively, with ITA, SGP, and CAN clustering between $104,000 and $115,000. At the other end, KEN and GHA have predicted steady states below $5,000, consistent with their very low productivity levels, being the fundamental driver of steady-state income in the open-economy framework. ZAF sits at ~$20,000 and ARG at ~$40,000, reflecting their intermediate development status. CHN's bar is near zero, reflecting a known calibration limitation for large-population economies. Note that JPN and KOR are excluded from this chart as their calibration violates the open-economy stability condition.
+
+### What Drives Long-Run Income Differences?
+
+In the open-economy Solow model, steady-state GDP per capita is determined by productivity (B) and the world interest rate, not by savings rates or population growth. The figure below shows calibrated total factor productivity (B) across the 11 countries for which the model is stable, revealing the fundamental driver of long-run income differences.
+
+**Productivity (B) across countries:**
+```{python}
+import matplotlib.pyplot as plt
+import pandas as pd
+
+params_list = []
+for country in countries:
+    try:
+        params = analyzer.build_country_parameters(country)
+        params_list.append({"country": country, "B": params["B"]})
+    except ValueError:
+        pass
+
+df_b = pd.DataFrame(params_list)
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.bar(df_b["country"], df_b["B"], edgecolor="gray")
+ax.set_title("Total Factor Productivity (B) by country")
+ax.set_ylabel("B")
+ax.grid(True, alpha=0.3, axis="y")
+plt.tight_layout()
+plt.show()
+```
+
+The productivity gap between development groups is stark. Among developed economies, USA leads at ~1,223, followed by GBR at ~1,070, both far above the rest of the sample. FRA, ITA, and CAN cluster between 930 and 980, with SGP at ~910. At the other end, KEN and GHA sit below 100, less than 10% of the USA's level. ZAF and BRA fall in between at ~300, while ARG reaches ~475. This productivity gap is the fundamental driver of long-run income differences in a world of free capital mobility, it is productivity that determines prosperity, not savings behaviour.
+
+## Conclusion and Discussion
+
+This analysis applied the Solow open-economy growth model to 14 countries spanning three development levels over the period 2000–2015, of which 11 yield a stable open-economy calibration, using FRED and World Bank data stored in a relational DuckDB database.
+
+**Countries are converging toward their steady states, but from very different starting points.** The convergence paths show that all groups are moving toward their predicted steady states, confirming the model's core prediction. However, the starting gaps are large as developing economies like Kenya and Ghana begin around -1.7 log deviations below their steady state, while developed economies start between -1.5 and -1.75. Ghana's trajectory is particularly striking, briefly exceeding its predicted steady state around 2013 before falling back, likely reflecting commodity-driven growth that outpaced the model's predictions.
+
+**Convergence speed is broadly similar across groups.** The half-life estimates from the model suggest convergence takes roughly 10-15 years across all groups, faster than the closed-economy Solow model would predict, which is consistent with the open-economy framework where capital can flow freely across borders. Note that JPN is excluded from the convergence analysis as its calibration violates the open-economy stability condition.
+
+**In the Open Economy, Productivity Not Savings Drives Long-Run Income Differences** A key theoretical result of the open-economy Solow framework is that steady-state GDP per capita is determined by total factor productivity (B) and the world interest rate, not by the savings rate. The productivity chart confirms this starkly: the USA leads with B exceeding 1,200, while other developed economies cluster between 930 and 1,070, and Kenya and Ghana sit below 100. This 10-20x productivity gap is the fundamental reason income differences persist across development levels, and no amount of savings accumulation alone can close it under free capital mobility.
+
+**China and Singapore challenge simple development classifications.** Singapore, classified here as emerging, reaches developed-economy income levels by 2015, while China's predicted steady state collapses toward zero due to its enormous labor force diluting the calibrated productivity parameter. Both cases highlight limitations of applying a simple Solow calibration to economies with exceptional structural characteristics.
+
+**Limitations.** The model assumes a fixed world interest rate and perfect capital mobility, strong assumptions that do not hold perfectly in practice. The calibration of B from a single initial year is sensitive to data quality and may not capture long-run technological trajectories. Expanding the sample to more countries across all development levels, and extending the time horizon beyond 2015, would strengthen the robustness of these findings.
